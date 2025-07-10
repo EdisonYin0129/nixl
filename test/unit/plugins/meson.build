@@ -18,6 +18,14 @@ subdir('ucx_mo')
 subdir('posix')
 
 
+# Add CXL experimental plugin tests if libnuma is available
+cc = meson.get_compiler('cpp')
+libnuma_dep = cc.find_library('numa', required: false)
+if libnuma_dep.found()
+    subdir('cxl_exp')
+endif
+
+
 if cuda_dep.found() and doca_gpunetio_dep.found()
     subdir('gpunetio')
 endif

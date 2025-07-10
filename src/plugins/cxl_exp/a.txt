@@ -1,0 +1,83 @@
+root@gnr0:~/yimingy/nixl# meson setup gds
+The Meson build system
+Version: 1.5.1
+Source dir: /root/yimingy/nixl
+Build dir: /root/yimingy/nixl/gds
+Build type: native build
+Project name: nixl
+Project version: 0.4.0
+C++ compiler for the host machine: c++ (gcc 14.2.0 "c++ (Ubuntu 14.2.0-4ubuntu2) 14.2.0")
+C++ linker for the host machine: c++ ld.bfd 2.43.1
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Library dl found: YES
+Library rt found: YES
+Run-time dependency threads found: YES
+Library aio found: YES
+Checking for function "aio_cancel" : YES 
+
+Executing subproject abseil-cpp 
+
+abseil-cpp| Project name: abseil-cpp
+abseil-cpp| Project version: 20240722.0
+abseil-cpp| C++ compiler for the host machine: c++ (gcc 14.2.0 "c++ (Ubuntu 14.2.0-4ubuntu2) 14.2.0")
+abseil-cpp| C++ linker for the host machine: c++ ld.bfd 2.43.1
+abseil-cpp| Compiler for C++ supports arguments /DNOMINMAX: NO
+abseil-cpp| Compiler for C++ supports arguments -Wno-sign-compare: YES
+abseil-cpp| Compiler for C++ supports arguments -Wno-gcc-compat: NO
+abseil-cpp| Compiler for C++ supports arguments -maes: YES
+abseil-cpp| Compiler for C++ supports arguments -msse4.1: YES
+abseil-cpp| Checking if "atomic builtins" : links: YES
+abseil-cpp| Dependency threads found: YES unknown (cached)
+abseil-cpp| Run-time dependency appleframeworks found: NO (tried framework)
+abseil-cpp| Build targets in project: 15
+abseil-cpp| Subproject abseil-cpp finished.
+
+Found pkg-config: YES (/usr/bin/pkg-config) 1.8.1
+Found CMake: /usr/bin/cmake (3.30.3)
+Run-time dependency taskflow found: NO (tried pkgconfig and cmake)
+Looking for a fallback subproject for the dependency taskflow
+
+Executing subproject taskflow 
+
+taskflow| Project name: taskflow
+taskflow| Project version: 3.10.0
+taskflow| C++ compiler for the host machine: c++ (gcc 14.2.0 "c++ (Ubuntu 14.2.0-4ubuntu2) 14.2.0")
+taskflow| C++ linker for the host machine: c++ ld.bfd 2.43.1
+taskflow| Build targets in project: 15
+taskflow| Subproject taskflow finished.
+
+Dependency taskflow from subproject subprojects/taskflow-3.10.0 found: YES 3.10.0
+WARNING: Could not detect CUDA Toolkit version for /usr/local/cuda
+Run-time dependency CUDA (modules: cudart, cuda) found: NO (tried system)
+Run-time dependency doca-gpunetio found: NO (tried pkgconfig and cmake)
+Run-time dependency etcd-cpp-api found: NO (tried pkgconfig and cmake)
+Message: ETCD CPP API library not found, will disable etcd support
+Run-time dependency ucx found: YES 1.17.0
+Program python3 found: YES (/usr/bin/python3)
+Run-time dependency liburing found: NO (tried pkgconfig and cmake)
+Message: Correct libaio found, Building POSIX plugin
+Message: liburing not found, building with AIO support only
+Run-time dependency aws-cpp-sdk-s3 found: NO (tried pkgconfig and cmake)
+Library transfer_engine found: NO
+Library hf3fs_api_shared found: NO
+Library transfer_engine found: NO
+Run-time dependency pybind11 found: YES 2.13.5
+Program python3 found: YES (/usr/bin/python3)
+Run-time dependency python found: YES 3.12
+Program rustc found: YES (/root/.cargo/bin/rustc)
+Program cargo found: YES (/root/.cargo/bin/cargo)
+Dependency absl_log from subproject subprojects/abseil-cpp-20240722.0 found: YES 20240722.0
+Library transfer_engine found: NO
+Library hf3fs_api_shared found: NO
+Run-time dependency GTest found: YES 1.12.1
+Run-time dependency aws-cpp-sdk-s3 found: NO (tried pkgconfig and cmake)
+Build targets in project: 47
+
+nixl 0.4.0
+
+  Subprojects
+    abseil-cpp: YES
+    taskflow  : YES
+
+Found ninja-1.12.1 at /usr/bin/ninja

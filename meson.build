@@ -123,6 +123,19 @@ else
   ucx_dep = dependency('ucx', modules: ['ucx::ucs', 'ucx::ucp', 'ucx::uct'])
 endif
 
+# Check for libnuma (needed for CXL experimental plugin)
+numa_dep = cpp.find_library('numa', required: false)
+if numa_dep.found()
+  message('libnuma found, will enable CXL experimental plugin')
+else
+  message('libnuma not found, will disable CXL experimental plugin')
+  add_project_arguments('-DDISABLE_CXL_EXP_BACKEND', language: 'cpp')
+endif
+
+if get_option('disable_cxl_exp_backend')
+  add_project_arguments('-DDISABLE_CXL_EXP_BACKEND', language: 'cpp')
+endif
+
 if get_option('disable_gds_backend')
     add_project_arguments('-DDISABLE_GDS_BACKEND', language: 'cpp')
 endif

@@ -46,3 +46,8 @@ endif
 if cuda_dep.found() and doca_gpunetio_dep.found()
     subdir('gpunetio')
 endif
+
+# Check for libnuma dependency for CXL experimental plugin
+if numa_dep.found() and not get_option('disable_cxl_exp_backend')
+    subdir('cxl_exp')
+endif
