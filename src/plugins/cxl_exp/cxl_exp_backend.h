@@ -55,6 +55,14 @@ public:
 
 class nixlCxlExpEngine : public nixlBackendEngine {
 public:
+    // CXL node performance information
+    struct CXLNodeInfo {
+        uint64_t read_bandwidth_mbps = 16000; // Default: 16 GB/s read bandwidth
+        uint64_t write_bandwidth_mbps = 14000; // Default: 14 GB/s write bandwidth
+        uint32_t read_latency_ns = 120; // Default: 120ns read latency
+        uint32_t write_latency_ns = 150; // Default: 150ns write latency
+    };
+
     nixlCxlExpEngine(const nixlBackendInitParams *init_params);
     ~nixlCxlExpEngine();
 
@@ -129,6 +137,18 @@ public:
     nixl_status_t
     releaseReqH(nixlBackendReqH *handle) const override;
 
+    // Cost estimation - match the base class signature exactly
+    nixl_status_t
+    estimateXferCost(const nixl_xfer_op_t &operation,
+                     const nixl_meta_dlist_t &local,
+                     const nixl_meta_dlist_t &remote,
+                     const std::string &remote_agent,
+                     nixlBackendReqH *const &handle,
+                     std::chrono::microseconds &duration,
+                     std::chrono::microseconds &err_margin,
+                     nixl_cost_t &method,
+                     const nixl_opt_args_t *opt_args = nullptr) const override;
+
 private:
     // Helper methods for initialization
     bool
@@ -136,12 +156,23 @@ private:
     bool
     discoverCXLNodes();
 
+    // Helper methods for CXL device metrics
+    bool
+    fileExists(const std::string &path);
+    uint64_t
+    readUint64FromFile(const std::string &path);
+    void
+    readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info);
+
     // Member variables
     std::string agent_name_;
     bool initialized_ = false;
 
     // Map of NUMA node ID to its properties (e.g., max bandwidth)
     std::map<int, uint64_t> cxl_nodes_;
+
+    // Map NUMA node ID to performance characteristics
+    std::map<int, CXLNodeInfo> cxl_node_info_;
 };
 
 nixl_b_params_t
