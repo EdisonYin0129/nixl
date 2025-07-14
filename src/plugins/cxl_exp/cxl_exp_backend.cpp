@@ -18,6 +18,7 @@
 #include "cxl_exp_backend.h"
 #include "common/nixl_log.h"
 #include <numaif.h>
+#include <numa.h>
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
@@ -31,6 +32,21 @@ get_cxl_exp_backend_options() {
     params["numa_policy"] = "bind"; // Options: bind, preferred, interleave
     params["force_cxl_device"] = ""; // Empty means auto-detect
     return params;
+}
+
+/**
+ * Lightweight reader for optional sysfs u64 attributes.
+ * @return true and populates @out on success, false if the file is missing
+ *         or cannot be parsed.  No logging is emitted – callers decide.
+ */
+static bool
+readSysfsU64(const std::string &path, uint64_t &out) {
+    std::ifstream f(path);
+    if (!f.good()) {
+        return false;
+    }
+    f >> out;
+    return f.good();
 }
 
 nixlCxlExpEngine::nixlCxlExpEngine(const nixlBackendInitParams *init_params)
@@ -92,10 +108,7 @@ nixlCxlExpEngine::~nixlCxlExpEngine() {
 
 nixl_mem_list_t
 nixlCxlExpEngine::getSupportedMems() const {
-    nixl_mem_list_t mems;
-    mems.push_back(DRAM_SEG); // Regular memory
-    // Add custom memory type for CXL if needed in the future
-    return mems;
+    return {DRAM_SEG, CXL_EXP_SEG};
 }
 
 bool
@@ -107,188 +120,136 @@ nixlCxlExpEngine::checkSNC() {
 
 bool
 nixlCxlExpEngine::discoverCXLNodes() {
-    // Get total number of NUMA nodes
-    int max_node = numa_max_node();
-    if (max_node < 0) {
-        NIXL_ERROR << "Failed to get maximum NUMA node";
+    // Try direct CXL sysfs path discovery
+    const std::string cxl_path = "/sys/bus/cxl/devices";
+    NIXL_INFO << "Checking for CXL devices at path: " << cxl_path;
+
+    DIR *dir = opendir(cxl_path.c_str());
+    if (!dir) {
+        NIXL_WARN << "CXL sysfs path \"" << cxl_path
+                  << "\" not found or cannot be opened (errno=" << errno << " - " << strerror(errno)
+                  << "). "
+                  << "CXL discovery aborted.";
         return false;
     }
 
-    NIXL_INFO << "Discover CXL Nodes: max_node=" << max_node;
+    NIXL_INFO << "Successfully opened CXL path: " << cxl_path;
 
-    // First try direct CXL sysfs path discovery (more reliable on newer kernels)
-    const std::string cxl_path = "/sys/bus/cxl/devices";
-    NIXL_INFO << "Checking for CXL devices at path: " << cxl_path;
-    
-    DIR *dir = opendir(cxl_path.c_str());
-    if (!dir) {
-        NIXL_INFO << "CXL path not found or cannot be opened: " << cxl_path << " (errno=" << errno << " " << strerror(errno) << ")";
-    } else {
-        NIXL_INFO << "Successfully opened CXL path: " << cxl_path;
-        
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != nullptr) {
-            std::string name = entry->d_name;
-            NIXL_DEBUG << "Found directory entry: " << name;
-            
-            // Look for memory devices (mem*) or regions
-            if (name != "." && name != ".." &&
-                ((name.find("mem") == 0) || (name.find("region") == 0))) {
-                NIXL_INFO << "Found potential CXL device/region: " << name;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        NIXL_DEBUG << "Found directory entry: " << name;
 
-                std::string numa_node_path = cxl_path + "/" + name + "/numa_node";
-                NIXL_DEBUG << "Checking path: " << numa_node_path;
-                
-                if (!fileExists(numa_node_path)) {
-                    NIXL_DEBUG << "Path not found: " << numa_node_path;
-                    // For CXL regions, check in access0 directory
-                    numa_node_path = cxl_path + "/" + name + "/access0/numa_node";
-                    NIXL_DEBUG << "Checking alternative path: " << numa_node_path;
-                    
-                    if (!fileExists(numa_node_path)) {
-                        NIXL_DEBUG << "Path not found: " << numa_node_path;
-                        // Try alternative paths for different kernel versions
-                        numa_node_path = cxl_path + "/" + name + "/target_node";
-                        NIXL_DEBUG << "Checking last alternative path: " << numa_node_path;
-                    }
-                }
+        // Look for memory devices (mem*) or regions
+        if (name != "." && name != ".." &&
+            ((name.find("mem") == 0) || (name.find("region") == 0))) {
+            NIXL_INFO << "Found potential CXL device/region: " << name;
 
-                if (fileExists(numa_node_path)) {
-                    NIXL_INFO << "Found NUMA node path: " << numa_node_path;
-                    int node_id = readUint64FromFile(numa_node_path);
-                    NIXL_INFO << "Read NUMA node ID: " << node_id;
-                    
-                    if (node_id >= 0 && node_id <= max_node) {
-                        NIXL_INFO << "Valid NUMA node ID for CXL device: " << node_id;
-                        
-                        // Create node info structure and read real values
-                        CXLNodeInfo node_info{};
-                        node_info.read_bandwidth_mbps = 0;
-                        node_info.write_bandwidth_mbps = 0;
-                        node_info.read_latency_ns = 0;
-                        node_info.write_latency_ns = 0;
+            // ---------- Resolve NUMA node for this CXL endpoint ----------
+            const std::vector<std::string> cand = {
+                cxl_path + "/" + name + "/numa_node",
+                cxl_path + "/" + name + "/access0/numa_node",
+                cxl_path + "/" + name + "/target_node",
+            };
 
-                        // Check for region-specific bandwidth and latency files
-                        std::string access_path = cxl_path + "/" + name;
-                        if (name.find("region") == 0) {
-                            access_path += "/access0";
-                        }
-                        NIXL_DEBUG << "Looking for bandwidth/latency info at: " << access_path;
-
-                        // Try to read bandwidth and latency directly from the device
-                        std::string read_bw_path = access_path + "/read_bandwidth";
-                        std::string write_bw_path = access_path + "/write_bandwidth";
-                        std::string read_lat_path = access_path + "/read_latency";
-                        std::string write_lat_path = access_path + "/write_latency";
-                        
-                        NIXL_DEBUG << "Checking read bandwidth at: " << read_bw_path;
-                        uint64_t read_bw = readUint64FromFile(read_bw_path);
-                        NIXL_DEBUG << "Checking write bandwidth at: " << write_bw_path;
-                        uint64_t write_bw = readUint64FromFile(write_bw_path);
-                        NIXL_DEBUG << "Checking read latency at: " << read_lat_path;
-                        uint64_t read_lat = readUint64FromFile(read_lat_path);
-                        NIXL_DEBUG << "Checking write latency at: " << write_lat_path;
-                        uint64_t write_lat = readUint64FromFile(write_lat_path);
-                        
-                        NIXL_INFO << "Read BW: " << read_bw << ", Write BW: " << write_bw 
-                                  << ", Read latency: " << read_lat << ", Write latency: " << write_lat;
-
-                        if (read_bw > 0) {
-                            node_info.read_bandwidth_mbps = read_bw / 1024; // Convert KiB/s to MiB/s
-                            NIXL_DEBUG << "Set read_bandwidth_mbps = " << node_info.read_bandwidth_mbps;
-                        }
-                        if (write_bw > 0) {
-                            node_info.write_bandwidth_mbps = write_bw / 1024;
-                            NIXL_DEBUG << "Set write_bandwidth_mbps = " << node_info.write_bandwidth_mbps;
-                        }
-                        if (read_lat > 0) {
-                            node_info.read_latency_ns = read_lat;
-                            NIXL_DEBUG << "Set read_latency_ns = " << node_info.read_latency_ns;
-                        }
-                        if (write_lat > 0) {
-                            node_info.write_latency_ns = write_lat;
-                            NIXL_DEBUG << "Set write_latency_ns = " << node_info.write_latency_ns;
-                        }
-
-                        // If direct reads failed, try our comprehensive performance metric reader
-                        if (node_info.read_bandwidth_mbps == 0 || node_info.read_latency_ns == 0) {
-                            NIXL_INFO << "Direct metrics reading failed, trying performance metric reader...";
-                            readCXLPerformanceMetrics(node_id, node_info);
-                        }
-
-                        NIXL_INFO << "Discovered CXL device " << name << " on NUMA node " << node_id;
-                        NIXL_INFO << "  Read BW: " << node_info.read_bandwidth_mbps
-                                  << " MB/s, Write BW: " << node_info.write_bandwidth_mbps
-                                  << " MB/s";
-                        NIXL_INFO << "  Read latency: " << node_info.read_latency_ns
-                                  << " ns, Write latency: " << node_info.write_latency_ns << " ns";
-
-                        cxl_node_info_[node_id] = node_info;
-                        cxl_nodes_[node_id] = node_info.read_bandwidth_mbps;
-                        NIXL_INFO << "Added node " << node_id << " to cxl_nodes_ and cxl_node_info_ maps";
-                    } else {
-                        NIXL_WARN << "Invalid NUMA node ID: " << node_id << " (max_node=" << max_node << ")";
-                    }
-                } else {
-                    NIXL_INFO << "Could not find any valid NUMA node path for: " << name;
+            uint64_t node_val = 0;
+            bool have_id = false;
+            for (const auto &p : cand) {
+                if (readSysfsU64(p, node_val)) {
+                    have_id = true;
+                    break;
                 }
             }
-        }
-        closedir(dir);
-        NIXL_INFO << "Finished reading CXL device directory";
-    }
-
-    // If direct method found CXL nodes, we're done
-    if (!cxl_nodes_.empty()) {
-        NIXL_INFO << "CXL nodes found via direct sysfs path: " << cxl_nodes_.size() << " nodes";
-        return true;
-    }
-
-    // Fall back to heuristic-based approach
-    NIXL_WARN << "No CXL devices found via direct sysfs, falling back to heuristics";
-
-    // Detect CXL nodes by examining node distance and characteristics
-    for (int i = 0; i <= max_node; i++) {
-        // Skip nodes that aren't configured or available
-        if (!numa_bitmask_isbitset(numa_all_nodes_ptr, i)) {
-            continue;
-        }
-
-        // Check if this is a CXL node based on distance or other properties
-        bool is_cxl_node = false;
-
-        // 1. Check distance from node 0 (CPU node)
-        if (numa_distance(0, i) > 20) { // Threshold may vary
-            is_cxl_node = true;
-        }
-
-        // 2. Check memory size and look for CXL-specific indicators
-        long long node_free_size = numa_node_size64(i, nullptr);
-        if (node_free_size > 0) {
-            std::string node_path = "/sys/devices/system/node/node" + std::to_string(i);
-            if (fileExists(node_path + "/memory_side_cache") ||
-                fileExists(node_path + "/cxl_device")) {
-                is_cxl_node = true;
-                NIXL_INFO << "Found CXL-specific indicators for node " << i;
+            if (!have_id) {
+                NIXL_DEBUG << "No NUMA id attribute found for " << name << "; skipping";
+                continue;
             }
-        }
+            const int node_id = static_cast<int>(node_val);
+            if (node_id < 0) {
+                NIXL_DEBUG << "Negative NUMA id for " << name << "; skipping";
+                continue;
+            }
 
-        if (is_cxl_node) {
-            // Create node info structure with real values when possible
+            // Create node info structure and read real values
             CXLNodeInfo node_info{};
-            readCXLPerformanceMetrics(i, node_info);
+            node_info.read_bandwidth_mbps = 0;
+            node_info.write_bandwidth_mbps = 0;
+            node_info.read_latency_ns = 0;
+            node_info.write_latency_ns = 0;
 
-            NIXL_INFO << "CXL Node " << i << " metrics - Read BW: " << node_info.read_bandwidth_mbps
+            // Check for region-specific bandwidth and latency files
+            std::string access_path = cxl_path + "/" + name;
+            if (name.find("region") == 0) {
+                access_path += "/access0";
+            }
+            NIXL_DEBUG << "Looking for bandwidth/latency info at: " << access_path;
+
+            // Try to read bandwidth and latency directly from the device
+            std::string read_bw_path = access_path + "/read_bandwidth";
+            std::string write_bw_path = access_path + "/write_bandwidth";
+            std::string read_lat_path = access_path + "/read_latency";
+            std::string write_lat_path = access_path + "/write_latency";
+
+            NIXL_DEBUG << "Checking read bandwidth at: " << read_bw_path;
+            uint64_t read_bw = readUint64FromFile(read_bw_path);
+            NIXL_DEBUG << "Checking write bandwidth at: " << write_bw_path;
+            uint64_t write_bw = readUint64FromFile(write_bw_path);
+            NIXL_DEBUG << "Checking read latency at: " << read_lat_path;
+            uint64_t read_lat = readUint64FromFile(read_lat_path);
+            NIXL_DEBUG << "Checking write latency at: " << write_lat_path;
+            uint64_t write_lat = readUint64FromFile(write_lat_path);
+
+            NIXL_INFO << "Read BW: " << read_bw << ", Write BW: " << write_bw
+                      << ", Read latency: " << read_lat << ", Write latency: " << write_lat;
+
+            if (read_bw > 0) {
+                node_info.read_bandwidth_mbps = read_bw / 1024; // Convert KiB/s to MiB/s
+                NIXL_DEBUG << "Set read_bandwidth_mbps = " << node_info.read_bandwidth_mbps;
+            }
+            if (write_bw > 0) {
+                node_info.write_bandwidth_mbps = write_bw / 1024;
+                NIXL_DEBUG << "Set write_bandwidth_mbps = " << node_info.write_bandwidth_mbps;
+            }
+            if (read_lat > 0) {
+                node_info.read_latency_ns = read_lat;
+                NIXL_DEBUG << "Set read_latency_ns = " << node_info.read_latency_ns;
+            }
+            if (write_lat > 0) {
+                node_info.write_latency_ns = write_lat;
+                NIXL_DEBUG << "Set write_latency_ns = " << node_info.write_latency_ns;
+            }
+
+            // If direct reads failed, try our comprehensive performance metric reader
+            if (node_info.read_bandwidth_mbps == 0 || node_info.read_latency_ns == 0) {
+                NIXL_INFO << "Direct metrics reading failed, trying performance metric "
+                             "reader...";
+                readCXLPerformanceMetrics(node_id, node_info);
+            }
+
+            NIXL_INFO << "Discovered CXL device " << name << " on NUMA node " << node_id;
+            NIXL_INFO << "  Read BW: " << node_info.read_bandwidth_mbps
                       << " MB/s, Write BW: " << node_info.write_bandwidth_mbps << " MB/s";
             NIXL_INFO << "  Read latency: " << node_info.read_latency_ns
                       << " ns, Write latency: " << node_info.write_latency_ns << " ns";
 
-            cxl_node_info_[i] = node_info;
-            cxl_nodes_[i] = node_info.read_bandwidth_mbps;
+            cxl_node_info_.emplace(node_id, node_info);
+            cxl_nodes_.emplace(node_id, node_info.read_bandwidth_mbps);
+            NIXL_INFO << "Added node " << node_id << " to cxl_nodes_ and cxl_node_info_ maps";
         }
     }
+    closedir(dir);
+    NIXL_INFO << "Finished reading CXL device directory";
 
-    return !cxl_nodes_.empty();
+    if (!cxl_nodes_.empty()) {
+        NIXL_INFO << "CXL nodes found via direct sysfs path: " << cxl_nodes_.size() << " nodes";
+        return true;
+    } else {
+        NIXL_WARN << "discoverCXLNodes(): no nodes via /sys/bus/cxl/devices - "
+                  << "ensure the kernel CXL driver is loaded and that "
+                  << "`/sys/bus/cxl/devices/*/numa_node` exists.";
+    }
+
+    return false;
 }
 
 // Helper method to check if a file exists
@@ -432,8 +393,8 @@ nixlCxlExpEngine::registerMem(const nixlBlobDesc &mem,
         return NIXL_ERR_BACKEND;
     }
 
-    if (nixl_mem != DRAM_SEG) {
-        NIXL_ERROR << "CXL backend only supports DRAM_SEG memory type";
+    if (nixl_mem != DRAM_SEG && nixl_mem != CXL_EXP_SEG) {
+        NIXL_ERROR << "CXL backend supports only DRAM_SEG or CXL_EXP_SEG";
         return NIXL_ERR_INVALID_PARAM;
     }
 
@@ -456,7 +417,8 @@ nixlCxlExpEngine::registerMem(const nixlBlobDesc &mem,
             NIXL_INFO << "Registered memory is on regular NUMA node " << node_result;
         }
     } else {
-        NIXL_WARN << "Could not determine NUMA node for memory at " << addr;
+        NIXL_WARN << "Could not determine NUMA node for memory at " << addr << " (errno=" << errno
+                  << ")";
     }
 
     out = metadata;
@@ -523,6 +485,25 @@ nixlCxlExpEngine::postXfer(const nixl_xfer_op_t &operation,
 
     nixlCxlExpBackendReqH *req = static_cast<nixlCxlExpBackendReqH *>(handle);
 
+    // Choose NUMA node of the source buffer (if CXL)
+    int target_node = -1;
+    const nixl_meta_dlist_t &src_list = (operation == NIXL_READ) ? remote : local;
+    if (src_list.descCount() > 0) {
+        auto *md = dynamic_cast<nixlCxlExpMetadata *>(src_list[0].metadataP);
+        if (md) target_node = md->numa_node_id;
+    }
+
+    struct bitmask *orig_mask = nullptr;
+    struct bitmask *tgt_mask = nullptr;
+    if (target_node >= 0) {
+        orig_mask = numa_get_run_node_mask();
+        tgt_mask = numa_allocate_nodemask();
+        numa_bitmask_clearall(tgt_mask);
+        numa_bitmask_setbit(tgt_mask, target_node);
+        if (numa_run_on_node_mask(tgt_mask) != 0)
+            NIXL_WARN << "Failed to bind to NUMA node " << target_node;
+    }
+
     // Perform the memory transfer for each descriptor pair
     for (int i = 0; i < local.descCount(); i++) {
         const nixlMetaDesc &local_desc = local[i];
@@ -545,6 +526,13 @@ nixlCxlExpEngine::postXfer(const nixl_xfer_op_t &operation,
 
     // Mark operation as completed
     req->operation_completed = true;
+
+    // Restore original affinity
+    if (tgt_mask) {
+        numa_run_on_node_mask(orig_mask);
+        numa_free_nodemask(tgt_mask);
+        numa_free_nodemask(orig_mask);
+    }
 
     return NIXL_SUCCESS;
 }
@@ -645,7 +633,7 @@ nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &operation,
     if (bandwidth_mbps == 0) {
         bandwidth_mbps = 30000; // fallback 30 GB/s
     }
-    // method = NIXL_COST_MODEL_ANALYTIC;  // mark that we used the analytic model
+    method = nixl_cost_t::ANALYTICAL_BACKEND;
 
     // Calculate total transfer size in bytes
     size_t total_size = 0;
