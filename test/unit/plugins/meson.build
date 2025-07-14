@@ -18,11 +18,12 @@ subdir('ucx_mo')
 subdir('posix')
 
 
-# Add CXL experimental plugin tests if libnuma is available
+# Only add CXL tests if libnuma is available
 cc = meson.get_compiler('cpp')
 libnuma_dep = cc.find_library('numa', required: false)
+
 if libnuma_dep.found()
-    subdir('cxl_exp')
+  subdir('cxl_exp')
 endif
 
 

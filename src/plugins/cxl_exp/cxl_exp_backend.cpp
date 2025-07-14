@@ -564,97 +564,69 @@ nixlCxlExpEngine::releaseReqH(nixlBackendReqH *handle) const {
 
 // Update the estimateXferCost method signature to match the base class
 nixl_status_t
-nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &operation,
+nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &op,
                                    const nixl_meta_dlist_t &local,
                                    const nixl_meta_dlist_t &remote,
-                                   const std::string &remote_agent,
-                                   nixlBackendReqH *const &handle,
+                                   const std::string &,
+                                   nixlBackendReqH *const &,
                                    std::chrono::microseconds &duration,
-                                   std::chrono::microseconds &err_margin,
+                                   std::chrono::microseconds &err,
                                    nixl_cost_t &method,
-                                   const nixl_opt_args_t *opt_args) const {
-    if (!initialized_) {
-        return NIXL_ERR_BACKEND;
-    }
+                                   const nixl_opt_args_t *) const {
+    if (!initialized_) return NIXL_ERR_BACKEND;
 
-    // Determine which side is using CXL memory
+    // Locate a descriptor that lives on a CXL node
+    const nixl_meta_dlist_t *src_lists[2] = {&local, &remote};
     const nixl_meta_dlist_t *cxl_list = nullptr;
-    nixlCxlExpMetadata *cxl_md = nullptr;
+    const nixlCxlExpMetadata *cxl_md = nullptr;
 
-    // First, check if local list has CXL memory
-    for (int i = 0; i < local.descCount(); i++) {
-        auto md = dynamic_cast<nixlCxlExpMetadata *>(local[i].metadataP);
-        if (md && cxl_nodes_.find(md->numa_node_id) != cxl_nodes_.end()) {
-            cxl_list = &local;
-            cxl_md = md;
-            break;
-        }
-    }
-
-    // If local list doesn't use CXL, check remote list
-    if (!cxl_md) {
-        for (int i = 0; i < remote.descCount(); i++) {
-            auto md = dynamic_cast<nixlCxlExpMetadata *>(remote[i].metadataP);
-            if (md && cxl_nodes_.find(md->numa_node_id) != cxl_nodes_.end()) {
-                cxl_list = &remote;
+    for (const auto *lst : src_lists) {
+        for (int i = 0; i < lst->descCount(); ++i) {
+            auto *md = dynamic_cast<nixlCxlExpMetadata *>((*lst)[i].metadataP);
+            if (md && cxl_nodes_.count(md->numa_node_id)) {
+                cxl_list = lst;
                 cxl_md = md;
                 break;
             }
         }
+        if (cxl_md) break;
     }
 
-    // If no CXL memory is involved, this plugin shouldn't be used
-    if (!cxl_md || !cxl_list) {
-        NIXL_WARN << "CXL cost estimation called, but no CXL memory found";
-        duration = std::chrono::microseconds(1000000); // High cost: 1 second
-        err_margin = std::chrono::microseconds(500000); // 0.5 second error margin
+    if (!cxl_md) { // nothing on CXL
+        duration = std::chrono::seconds(1);
+        err = std::chrono::milliseconds(500);
         return NIXL_ERR_NOT_FOUND;
     }
 
-    // Get CXL node information
-    int numa_node = cxl_md->numa_node_id;
-    auto it = cxl_node_info_.find(numa_node);
-    if (it == cxl_node_info_.end()) {
-        // Fall back to the regular map if node_info isn't available
-        duration = std::chrono::microseconds(500000); // Medium cost: 0.5 second
-        err_margin = std::chrono::microseconds(250000); // 0.25 second error margin
+    // Pull per-node performance numbers
+    const auto it = cxl_node_info_.find(cxl_md->numa_node_id);
+    if (it == cxl_node_info_.end()) { // node discovered but metrics absent
+        duration = std::chrono::milliseconds(500);
+        err = std::chrono::milliseconds(250);
         return NIXL_SUCCESS;
     }
 
-    const CXLNodeInfo &node_info = it->second;
+    uint64_t bw =
+        (op == NIXL_WRITE) ? it->second.write_bandwidth_mbps : it->second.read_bandwidth_mbps;
+    uint32_t lat_ns = (op == NIXL_WRITE) ? it->second.write_latency_ns : it->second.read_latency_ns;
 
-    // Get the appropriate bandwidth and latency based on operation
-    uint64_t bandwidth_mbps =
-        (operation == NIXL_WRITE) ? node_info.write_bandwidth_mbps : node_info.read_bandwidth_mbps;
-    uint32_t latency_ns =
-        (operation == NIXL_WRITE) ? node_info.write_latency_ns : node_info.read_latency_ns;
+    if (bw == 0) bw = 30'000; // last-ditch default for both paths
 
-    /* Avoid divide‑by‑zero and identify the cost model */
-    if (bandwidth_mbps == 0) {
-        bandwidth_mbps = 30000; // fallback 30 GB/s
-    }
+    // 3. Aggregate size & compute
+    size_t bytes = 0;
+    for (int i = 0; i < cxl_list->descCount(); ++i)
+        bytes += (*cxl_list)[i].len;
+
+    const double bw_Bps = bw * 1024.0 * 1024.0;
+    const double xfer_us = (static_cast<double>(bytes) / bw_Bps) * 1'000'000.0;
+    const double total_us = xfer_us + (lat_ns / 1'000.0);
+
+    duration = std::chrono::microseconds(static_cast<int64_t>(total_us));
+    err = std::chrono::microseconds(duration.count() / 10);
     method = nixl_cost_t::ANALYTICAL_BACKEND;
 
-    // Calculate total transfer size in bytes
-    size_t total_size = 0;
-    for (int i = 0; i < cxl_list->descCount(); i++) {
-        total_size += (*cxl_list)[i].len;
-    }
-
-    // Calculate transfer time
-    double latency_us = static_cast<double>(latency_ns) / 1000.0;
-    double bandwidth_bytes_per_sec = static_cast<double>(bandwidth_mbps) * 1024.0 * 1024.0;
-    double transfer_time_us =
-        (static_cast<double>(total_size) / bandwidth_bytes_per_sec) * 1000000.0;
-
-    // Set the duration (latency + transfer time)
-    duration = std::chrono::microseconds(static_cast<int64_t>(latency_us + transfer_time_us));
-
-    // Set error margin (10% of duration)
-    err_margin = std::chrono::microseconds(static_cast<int64_t>(duration.count() * 0.1));
-
-    NIXL_DEBUG << "CXL cost estimation: size=" << total_size << "B, duration=" << duration.count()
-               << "us, bandwidth=" << bandwidth_mbps << "MB/s";
+    NIXL_DEBUG << "CXL cost: " << bytes << " B via node " << cxl_md->numa_node_id << " -> "
+               << duration.count() << " µs @ " << bw << " MB/s";
 
     return NIXL_SUCCESS;
 }
