@@ -155,6 +155,13 @@ private:
     checkSNC();
     bool
     discoverCXLNodes();
+    /**
+     * Check if CXL devices exist in the system
+     *
+     * @return true if CXL devices are found, false otherwise
+     */
+    bool
+    checkCXLDevicesExist();
 
     // Helper methods for CXL device metrics
     bool
@@ -163,6 +170,15 @@ private:
     readUint64FromFile(const std::string &path);
     void
     readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info);
+
+    /**
+     * Check if CXL memory is in devdax mode or system-ram mode
+     * This affects how we interact with the memory
+     *
+     * @return true if in system-ram mode, false if in devdax mode
+     */
+    bool
+    checkCXLSystemRamMode();
 
     // Member variables
     std::string agent_name_;
