@@ -1,3 +1,4 @@
+
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -13,6 +14,25 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ */
+
+/**
+ * @file cxl_exp_backend.h
+ * @brief Experimental NIXL backend for CXL‑attached memory (local‑only).
+ *
+ * This backend provides NUMA‑aware, synchronous data‑movement primitives
+ * for CXL Type‑3 (memory) devices that are exposed to Linux as normal
+ * *system‑ram* NUMA nodes.  The current implementation:
+ *   - **Rejects** systems where the CXL region is still in *devdax* mode.
+ *   - **Requires** Sub‑NUMA Clustering (SNC) to be disabled so each socket
+ *     maps to a single NUMA node.
+ *   - Supports only *local* read / write operations (no remote agent, no
+ *     progress threads, no notifications).
+ *   - Derives very coarse cost estimates from either sysfs metrics
+ *     (`read_bandwidth`, `write_latency`, …) when available, or the static
+ *     defaults in @ref CXLNodeInfo.
+ *
+ * Design status: **experimental / evolving**.  Interfaces may change.
  */
 
 #ifndef __CXL_EXP_BACKEND_H
@@ -32,6 +52,13 @@
 class nixlCxlExpMetadata;
 class nixlCxlExpBackendReqH;
 
+/**
+ * Per‑registration metadata for a CXL memory blob.
+ *
+ * Currently caches only the NUMA node ID that backs the allocation. This will
+ * later be extended to store bandwidth and latency hints that are expensive
+ * to query repeatedly.
+ */
 class nixlCxlExpMetadata : public nixlBackendMD {
 public:
     nixlCxlExpMetadata() : nixlBackendMD(true), numa_node_id(-1) {}
@@ -41,6 +68,13 @@ public:
     // Potentially cache bandwidth/latency info here in the future
 };
 
+/**
+ * Lightweight request handle used during synchronous transfers.
+ *
+ * The engine is local‑only and synchronous; the handle mainly carries
+ * descriptor lists between `prepXfer`, `postXfer`, and `checkXfer`.  The
+ * `operation_completed` flag is set by `postXfer` and read by `checkXfer`.
+ */
 class nixlCxlExpBackendReqH : public nixlBackendReqH {
 public:
     nixlCxlExpBackendReqH() = default;
@@ -53,9 +87,29 @@ public:
     bool operation_completed = false;
 };
 
+/**
+ * Main engine that implements local data movement for CXL‑attached memory.
+ *
+ * Responsibilities
+ * ----------------
+ * - Discover CXL NUMA nodes and verify that memory is in *system‑ram* mode
+ *   with Sub‑NUMA Clustering (SNC) disabled.
+ * - Provide register and deregister wrappers around `mmap` and `mbind`.
+ * - Execute blocking read or write copies between arbitrary address sets.
+ * - Offer best‑effort transfer‑time estimates that drive the NIXL scheduler.
+ *
+ * Limitations
+ * -----------
+ * - No notification, remote transfer, or progress‑thread support.
+ */
 class nixlCxlExpEngine : public nixlBackendEngine {
 public:
-    // CXL node performance information
+    /**
+     * Static or probed performance characteristics for one NUMA node.
+     *
+     * Units are bandwidth in **MB/s** and latency in **ns**. Defaults originate
+     * from Intel L100/L40S lab measurements on kernel 6.11.
+     */
     struct CXLNodeInfo {
         uint64_t read_bandwidth_mbps = 16000; // Default: 16 GB/s read bandwidth
         uint64_t write_bandwidth_mbps = 14000; // Default: 14 GB/s write bandwidth
@@ -150,35 +204,57 @@ public:
                      const nixl_opt_args_t *opt_args = nullptr) const override;
 
 private:
-    // Helper methods for initialization
-    bool
-    checkSNC();
-    bool
-    discoverCXLNodes();
     /**
-     * Check if CXL devices exist in the system
+     * Check if Sub‑NUMA Clustering (SNC) is enabled.
      *
-     * @return true if CXL devices are found, false otherwise
+     * @return `true` if SNC is enabled, `false` otherwise.
      */
-    bool
-    checkCXLDevicesExist();
-
-    // Helper methods for CXL device metrics
-    bool
-    fileExists(const std::string &path);
-    uint64_t
-    readUint64FromFile(const std::string &path);
-    void
-    readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info);
+    bool checkSNC();
 
     /**
-     * Check if CXL memory is in devdax mode or system-ram mode
-     * This affects how we interact with the memory
+     * Discover NUMA nodes backed by CXL memory and populate internal maps.
      *
-     * @return true if in system-ram mode, false if in devdax mode
+     * @return `true` on success, `false` if no suitable nodes are found.
      */
-    bool
-    checkCXLSystemRamMode();
+    bool discoverCXLNodes();
+
+    /**
+     * Quickly test for the presence of any CXL device in `/sys/bus/cxl`.
+     *
+     * @return `true` if at least one device exists, `false` otherwise.
+     */
+    bool checkCXLDevicesExist();
+
+    /**
+     * Test whether a path exists in the file‑system.
+     *
+     * @param path Absolute path to test.
+     * @return `true` if the file exists, `false` otherwise.
+     */
+    bool fileExists(const std::string &path);
+
+    /**
+     * Read an unsigned integer value from a sysfs file.
+     *
+     * @param path Absolute path to the attribute.
+     * @return Parsed value, or 0 on error.
+     */
+    uint64_t readUint64FromFile(const std::string &path);
+
+    /**
+     * Populate performance metrics for a CXL NUMA node.
+     *
+     * @param node_id Kernel NUMA node identifier.
+     * @param node_info Structure to fill with bandwidth and latency figures.
+     */
+    void readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info);
+
+    /**
+     * Determine whether CXL memory is mapped as *system‑ram*.
+     *
+     * @return `true` if the devices are in *system‑ram* mode, `false` if still in *devdax*.
+     */
+    bool checkCXLSystemRamMode();
 
     // Member variables
     std::string agent_name_;

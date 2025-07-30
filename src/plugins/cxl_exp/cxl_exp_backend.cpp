@@ -26,6 +26,12 @@
 #include <fstream>
 #include <sys/types.h>
 
+/**
+ * Return the default key‑value options accepted by the experimental CXL
+ * backend.
+ *
+ * @return A map whose keys are option names and whose values are defaults.
+ */
 nixl_b_params_t
 get_cxl_exp_backend_options() {
     nixl_b_params_t params;
@@ -35,9 +41,11 @@ get_cxl_exp_backend_options() {
 }
 
 /**
- * Lightweight reader for optional sysfs u64 attributes.
- * @return true and populates @out on success, false if the file is missing
- *         or cannot be parsed.  No logging is emitted – callers decide.
+ * Read an unsigned 64‑bit value from a sysfs attribute.
+ *
+ * @param path Absolute path to the attribute.
+ * @param[out] out Populated with the parsed value on success.
+ * @return `true` if the attribute exists and was parsed, `false` otherwise.
  */
 static bool
 readSysfsU64(const std::string &path, uint64_t &out) {
@@ -98,9 +106,11 @@ nixlCxlExpEngine::nixlCxlExpEngine(const nixlBackendInitParams *init_params)
 }
 
 /**
- * Check if CXL devices exist in the system
+ * Test whether at least one CXL memory device is exposed under
+ * `/sys/bus/cxl/devices`.
  *
- * @return true if CXL devices are found, false otherwise
+ * @return `true` if a device entry of type *mem* or *region* is found,
+ *         `false` otherwise.
  */
 bool
 nixlCxlExpEngine::checkCXLDevicesExist() {
@@ -143,10 +153,12 @@ nixlCxlExpEngine::checkCXLDevicesExist() {
 }
 
 /**
- * Check if Sub-NUMA Clustering (SNC) is enabled on the system
- * SNC can affect memory access patterns and performance
+ * Detect whether Sub‑NUMA Clustering (SNC) is enabled.
  *
- * @return true if SNC is enabled, false otherwise
+ * The method looks for kernel hints in sysfs, `/proc/cpuinfo`, and NUMA
+ * distance tables.
+ *
+ * @return `true` if SNC is likely enabled, `false` otherwise.
  */
 bool
 nixlCxlExpEngine::checkSNC() {
@@ -213,11 +225,12 @@ nixlCxlExpEngine::checkSNC() {
 }
 
 /**
- * Discover CXL NUMA nodes in the system
- * This method attempts multiple detection approaches to be compatible with
- * different kernel versions and system configurations
+ * Enumerate NUMA nodes backed by CXL memory and gather performance metrics.
  *
- * @return true if at least one CXL NUMA node was found, false otherwise
+ * This routine fills both `cxl_nodes_` and `cxl_node_info_`.
+ *
+ * @return `true` if at least one suitable NUMA node is discovered,
+ *         `false` otherwise.
  */
 bool
 nixlCxlExpEngine::discoverCXLNodes() {
@@ -386,14 +399,24 @@ nixlCxlExpEngine::discoverCXLNodes() {
     return false;
 }
 
-// Helper method to check if a file exists
+/**
+ * Check whether a file or directory exists.
+ *
+ * @param path Absolute path to test.
+ * @return `true` if the path can be opened, `false` otherwise.
+ */
 bool
 nixlCxlExpEngine::fileExists(const std::string &path) {
     std::ifstream file(path);
     return file.good();
 }
 
-// Implementation of the missing function to read uint64_t values from files
+/**
+ * Read an unsigned 64‑bit integer from a text file.
+ *
+ * @param path Absolute path of the file.
+ * @return Parsed value, or 0 if the file does not exist or cannot be read.
+ */
 uint64_t
 nixlCxlExpEngine::readUint64FromFile(const std::string &path) {
     uint64_t value = 0;
@@ -416,7 +439,12 @@ nixlCxlExpEngine::readUint64FromFile(const std::string &path) {
     return value;
 }
 
-// Read real CXL performance metrics from sysfs or other sources
+/**
+ * Populate bandwidth and latency figures for a given NUMA node.
+ *
+ * @param node_id Kernel NUMA node identifier.
+ * @param node_info Structure to update in place.
+ */
 void
 nixlCxlExpEngine::readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info) {
     // Base path for node-specific information
@@ -519,6 +547,14 @@ nixlCxlExpEngine::readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info)
     }
 }
 
+/**
+ * Associate a memory range with the backend and record NUMA information.
+ *
+ * @param mem       Descriptor of the memory blob supplied by the caller.
+ * @param nixl_mem  Segment tag (e.g. DRAM_SEG or CXL_EXP_SEG).
+ * @param[out] out  Newly allocated backend metadata structure.
+ * @return `NIXL_SUCCESS` on success; an error code otherwise.
+ */
 nixl_status_t
 nixlCxlExpEngine::registerMem(const nixlBlobDesc &mem,
                               const nixl_mem_t &nixl_mem,
@@ -559,6 +595,12 @@ nixlCxlExpEngine::registerMem(const nixlBlobDesc &mem,
     return NIXL_SUCCESS;
 }
 
+/**
+ * Release backend metadata produced by `registerMem`.
+ *
+ * @param meta Pointer returned earlier by `registerMem`.
+ * @return `NIXL_SUCCESS` on success; an error code otherwise.
+ */
 nixl_status_t
 nixlCxlExpEngine::deregisterMem(nixlBackendMD *meta) {
     if (!meta) {
@@ -571,6 +613,17 @@ nixlCxlExpEngine::deregisterMem(nixlBackendMD *meta) {
     return NIXL_SUCCESS;
 }
 
+/**
+ * Validate a transfer request and create an internal handle.
+ *
+ * @param operation  Transfer direction (`NIXL_READ` or `NIXL_WRITE`).
+ * @param local      Local descriptor list.
+ * @param remote     Remote descriptor list.
+ * @param remote_agent Identifier of the peer agent (unused for local backend).
+ * @param[out] handle Newly allocated request handle.
+ * @param opt_args   Optional backend‑specific arguments.
+ * @return `NIXL_SUCCESS` on success; an error code otherwise.
+ */
 nixl_status_t
 nixlCxlExpEngine::prepXfer(const nixl_xfer_op_t &operation,
                            const nixl_meta_dlist_t &local,
@@ -607,16 +660,15 @@ nixlCxlExpEngine::prepXfer(const nixl_xfer_op_t &operation,
 }
 
 /**
- * Post a transfer request to be executed
- * This method performs the actual memory transfer between source and destination
+ * Execute a synchronous memory transfer described by a handle.
  *
- * @param operation The transfer operation type (READ or WRITE)
- * @param local The local descriptor list
- * @param remote The remote descriptor list
- * @param remote_agent The remote agent name
- * @param handle The request handle (populated by prepXfer)
- * @param opt_args Optional arguments for the transfer
- * @return NIXL_SUCCESS on success, error code otherwise
+ * @param operation See `prepXfer`.
+ * @param local     Local descriptor list.
+ * @param remote    Remote descriptor list.
+ * @param remote_agent Identifier of the peer agent (unused).
+ * @param handle    Handle created by `prepXfer`.
+ * @param opt_args  Optional backend‑specific arguments.
+ * @return `NIXL_SUCCESS` on success; an error code otherwise.
  */
 nixl_status_t
 nixlCxlExpEngine::postXfer(const nixl_xfer_op_t &operation,
@@ -711,6 +763,12 @@ nixlCxlExpEngine::postXfer(const nixl_xfer_op_t &operation,
     return NIXL_SUCCESS;
 }
 
+/**
+ * Query completion status of a transfer.
+ *
+ * @param handle Request handle created by `prepXfer`.
+ * @return `NIXL_SUCCESS` if completed, `NIXL_IN_PROG` otherwise.
+ */
 nixl_status_t
 nixlCxlExpEngine::checkXfer(nixlBackendReqH *handle) const {
     if (!handle) {
@@ -724,6 +782,12 @@ nixlCxlExpEngine::checkXfer(nixlBackendReqH *handle) const {
     return req->operation_completed ? NIXL_SUCCESS : NIXL_IN_PROG;
 }
 
+/**
+ * Destroy a request handle allocated by `prepXfer`.
+ *
+ * @param handle Pointer to the handle.
+ * @return `NIXL_SUCCESS` on success; an error code otherwise.
+ */
 nixl_status_t
 nixlCxlExpEngine::releaseReqH(nixlBackendReqH *handle) const {
     if (!handle) {
@@ -736,21 +800,16 @@ nixlCxlExpEngine::releaseReqH(nixlBackendReqH *handle) const {
     return NIXL_SUCCESS;
 }
 
-// Update the estimateXferCost method signature to match the base class
 /**
- * Estimate the cost (time) of a transfer operation
- * This provides performance estimates for the scheduler to make decisions
+ * Provide a best‑effort duration estimate for a transfer.
  *
- * @param op The transfer operation (READ or WRITE)
- * @param local The local descriptor list
- * @param remote The remote descriptor list
- * @param remote_agent The remote agent name
- * @param handle The request handle
- * @param duration Output parameter for estimated duration
- * @param err Output parameter for error margin
- * @param method Output parameter for cost model method used
- * @param opt_args Optional arguments
- * @return NIXL_SUCCESS on success, error code otherwise
+ * @param op       Transfer direction.
+ * @param local    Local descriptor list.
+ * @param remote   Remote descriptor list.
+ * @param duration Output parameter set to the estimated time.
+ * @param err      Output parameter for the error margin.
+ * @param method   Output parameter identifying the cost‑model used.
+ * @return `NIXL_SUCCESS` on success; an error code otherwise.
  */
 nixl_status_t
 nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &op,
@@ -838,10 +897,10 @@ nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &op,
 }
 
 /**
- * Check if CXL memory is in devdax mode or system-ram mode
- * System-ram mode is preferred for this plugin
+ * Determine whether CXL memory is mapped as *system‑ram* or *devdax*.
  *
- * @return true if in system-ram mode, false if in devdax mode
+ * @return `true` if the preferred *system‑ram* mode is active, `false`
+ *         otherwise.
  */
 bool
 nixlCxlExpEngine::checkCXLSystemRamMode() {
@@ -918,12 +977,18 @@ nixlCxlExpEngine::checkCXLSystemRamMode() {
     return system_ram_mode;
 }
 
+/** Destructor: logs shutdown and performs clean‑up. */
 nixlCxlExpEngine::~nixlCxlExpEngine() {
     // No special cleanup needed for now
     NIXL_INFO << "Destroying CXL Experimental Backend for agent: " << agent_name_;
     // Any cleanup code would go here
 }
 
+/**
+ * Return the list of memory segment types supported by this backend.
+ *
+ * @return A list containing `DRAM_SEG` and `CXL_EXP_SEG`.
+ */
 nixl_mem_list_t
 nixlCxlExpEngine::getSupportedMems() const {
     nixl_mem_list_t mems;
