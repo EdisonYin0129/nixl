@@ -178,7 +178,7 @@ nixlCxlExpEngine::checkSNC() {
     if (numa_available() >= 0 && numa_max_node() > 1) {
         for (int i = 0; i <= numa_max_node(); ++i) {
             for (int j = i + 1; j <= numa_max_node(); ++j) {
-                if (numa_distance(i, j) == 10) {   // typical SNC value
+                if (numa_distance(i, j) == 10) { // typical SNC value
                     return true;
                 }
             }
@@ -807,10 +807,10 @@ nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &op,
     }
 
     // If no CXL memory is involved, fall back to conservative default but do NOT fail
-    if (!cxl_md) {      /* fall back to conservative default but do NOT fail */
+    if (!cxl_md) { /* fall back to conservative default but do NOT fail */
         duration = std::chrono::milliseconds(250);
-        err      = std::chrono::milliseconds(100);
-        method   = nixl_cost_t::ANALYTICAL_BACKEND;
+        err = std::chrono::milliseconds(100);
+        method = nixl_cost_t::ANALYTICAL_BACKEND;
         return NIXL_SUCCESS;
     }
 
@@ -836,8 +836,10 @@ nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &op,
         bytes += (*cxl_list)[i].len;
     }
 
-    if (bw == 0) bw = 30'000; // 30 GB/s default
-    // Default fallback if bandwidth somehow wasn't set
+    // Default value for bandwidth
+    if (bw == 0) {
+        bw = 30'000;
+    }
 
     double total_us = 0;
     if (lat_ns > 0) {

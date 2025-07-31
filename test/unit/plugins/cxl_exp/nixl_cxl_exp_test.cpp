@@ -60,10 +60,12 @@ constexpr int line_width = 60;
 const std::string line_str(line_width, '=');
 constexpr size_t mb_size = 1024 * 1024;
 constexpr size_t gb_size = 1024 * 1024 * 1024;
+
 constexpr double
 us_to_s(double us) {
     return us / 1000000.0;
 }
+
 constexpr int progress_bar_width = line_width - 2; // -2 for the brackets
 
 // Custom deleter for aligned_alloc allocated memory
@@ -73,7 +75,6 @@ struct AlignedDeleter {
         if (ptr) free(ptr);
     }
 };
-
 
 /**
  * Centre‑align a string within a fixed column width.
@@ -87,7 +88,6 @@ center_str(const std::string &str) {
     return std::string((line_width - str.length()) / 2, ' ') + str;
 }
 
-
 /**
  * Generate a numbered phase title like “PHASE 1: Initialisation”.
  *
@@ -100,7 +100,6 @@ phase_title(const std::string &title) {
     return "PHASE " + std::to_string(phase_num++) + ": " + title;
 }
 
-
 /**
  * Pretty‑print a section banner framed by `=` characters.
  *
@@ -112,7 +111,6 @@ print_segment_title(const std::string &title) {
     std::cout << center_str(title) << std::endl;
     std::cout << line_str << std::endl;
 }
-
 
 /**
  * Convert microseconds to a human‑readable string.
@@ -131,7 +129,6 @@ format_duration(nixlTime::us_t us) {
     ss << std::fixed << std::setprecision(3) << seconds << " sec";
     return ss.str();
 }
-
 
 /**
  * Draw an ASCII progress bar that updates in‑place.
@@ -160,7 +157,6 @@ printProgress(float progress) {
         std::cout.flush();
     }
 }
-
 
 /**
  * Locate the first NUMA node that backs any `CXL.mem` device.
@@ -329,7 +325,6 @@ protected:
     releaseEngine(nixlBackendEngine *cxl) {
         delete cxl;
     }
-
 
     /**
      * Allocate page‑aligned memory on the caller’s preferred NUMA node.

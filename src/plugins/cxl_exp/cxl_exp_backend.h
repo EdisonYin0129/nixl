@@ -62,6 +62,7 @@ class nixlCxlExpBackendReqH;
 class nixlCxlExpMetadata : public nixlBackendMD {
 public:
     nixlCxlExpMetadata() : nixlBackendMD(true), numa_node_id(-1) {}
+
     ~nixlCxlExpMetadata() = default;
 
     int numa_node_id;
@@ -107,8 +108,7 @@ public:
     /**
      * Static or probed performance characteristics for one NUMA node.
      *
-     * Units are bandwidth in **MB/s** and latency in **ns**. Defaults originate
-     * from Intel L100/L40S lab measurements on kernel 6.11.
+     * Units are bandwidth in MB/s and latency in ns.
      */
     struct CXLNodeInfo {
         uint64_t read_bandwidth_mbps = 16000; // Default: 16 GB/s read bandwidth
@@ -125,14 +125,17 @@ public:
     supportsNotif() const override {
         return false;
     }
+
     bool
     supportsRemote() const override {
         return false;
     }
+
     bool
     supportsLocal() const override {
         return true;
     }
+
     bool
     supportsProgTh() const override {
         return false;
@@ -146,6 +149,7 @@ public:
     connect(const std::string &remote_agent) override {
         return NIXL_SUCCESS;
     }
+
     nixl_status_t
     disconnect(const std::string &remote_agent) override {
         return NIXL_SUCCESS;
@@ -163,6 +167,7 @@ public:
         output = input;
         return NIXL_SUCCESS;
     }
+
     nixl_status_t
     unloadMD(nixlBackendMD *input) override {
         return NIXL_SUCCESS;
@@ -191,7 +196,7 @@ public:
     nixl_status_t
     releaseReqH(nixlBackendReqH *handle) const override;
 
-    // Cost estimation - match the base class signature exactly
+    // Cost estimation
     nixl_status_t
     estimateXferCost(const nixl_xfer_op_t &operation,
                      const nixl_meta_dlist_t &local,
@@ -209,21 +214,24 @@ private:
      *
      * @return `true` if SNC is enabled, `false` otherwise.
      */
-    bool checkSNC();
+    bool
+    checkSNC();
 
     /**
      * Discover NUMA nodes backed by CXL memory and populate internal maps.
      *
      * @return `true` on success, `false` if no suitable nodes are found.
      */
-    bool discoverCXLNodes();
+    bool
+    discoverCXLNodes();
 
     /**
      * Quickly test for the presence of any CXL device in `/sys/bus/cxl`.
      *
      * @return `true` if at least one device exists, `false` otherwise.
      */
-    bool checkCXLDevicesExist();
+    bool
+    checkCXLDevicesExist();
 
     /**
      * Test whether a path exists in the file‑system.
@@ -231,7 +239,8 @@ private:
      * @param path Absolute path to test.
      * @return `true` if the file exists, `false` otherwise.
      */
-    bool fileExists(const std::string &path);
+    bool
+    fileExists(const std::string &path);
 
     /**
      * Read an unsigned integer value from a sysfs file.
@@ -239,7 +248,8 @@ private:
      * @param path Absolute path to the attribute.
      * @return Parsed value, or 0 on error.
      */
-    uint64_t readUint64FromFile(const std::string &path);
+    uint64_t
+    readUint64FromFile(const std::string &path);
 
     /**
      * Populate performance metrics for a CXL NUMA node.
@@ -247,14 +257,16 @@ private:
      * @param node_id Kernel NUMA node identifier.
      * @param node_info Structure to fill with bandwidth and latency figures.
      */
-    void readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info);
+    void
+    readCXLPerformanceMetrics(int node_id, CXLNodeInfo &node_info);
 
     /**
      * Determine whether CXL memory is mapped as *system‑ram*.
      *
      * @return `true` if the devices are in *system‑ram* mode, `false` if still in *devdax*.
      */
-    bool checkCXLSystemRamMode();
+    bool
+    checkCXLSystemRamMode();
 
     // Member variables
     std::string agent_name_;
