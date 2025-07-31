@@ -162,65 +162,30 @@ nixlCxlExpEngine::checkCXLDevicesExist() {
  */
 bool
 nixlCxlExpEngine::checkSNC() {
-    // Check common locations for SNC status
-    const std::vector<std::string> snc_paths = {
-        "/sys/devices/system/node/snc_enabled",
-        "/proc/cpuinfo", // Will check content for SNC indicators
-        "/sys/firmware/acpi/tables/SLIT" // Presence can indicate SNC
-    };
+    /* Preferred signal: kernel exposes an explicit on/off switch. */
+    const std::string snc_flag = "/sys/devices/system/node/snc_enabled";
+    if (fileExists(snc_flag)) {
+        std::ifstream f(snc_flag);
+        std::string v;
+        f >> v;
+        return (v == "1");
+    }
 
-    // Check if any of the SNC indicator files exist
-    for (const auto &path : snc_paths) {
-        if (path == "/proc/cpuinfo") {
-            // Special case: check /proc/cpuinfo content for SNC indicators
-            std::ifstream cpuinfo(path);
-            if (cpuinfo.good()) {
-                std::string line;
-                while (std::getline(cpuinfo, line)) {
-                    // Look for SNC indicators in CPU flags or other entries
-                    if (line.find("snc") != std::string::npos ||
-                        line.find("SNC") != std::string::npos) {
-                        NIXL_DEBUG << "SNC indicator found in " << path << ": " << line;
-                        return true;
-                    }
-                }
-            }
-        } else if (fileExists(path)) {
-            // For simple files, just check existence or content
-            std::ifstream snc_file(path);
-            if (snc_file.good()) {
-                std::string content;
-                snc_file >> content;
-                // If the file contains a value of 1 or "enabled", SNC is enabled
-                if (content == "1" || content == "enabled") {
-                    NIXL_DEBUG << "SNC enabled according to " << path;
+    /* Fallback heuristic: read NUMA distance matrix — treat distances
+     * of exactly 10 as SNC‑enabled (Intel default).  This is far less
+     * reliable than the sysfs flag, so we use it only when the flag
+     * is missing. */
+    if (numa_available() >= 0 && numa_max_node() > 1) {
+        for (int i = 0; i <= numa_max_node(); ++i) {
+            for (int j = i + 1; j <= numa_max_node(); ++j) {
+                if (numa_distance(i, j) == 10) {   // typical SNC value
                     return true;
                 }
             }
         }
     }
 
-    // Check NUMA node distances for SNC pattern
-    // SNC typically creates clusters with much lower distance within clusters
-    if (numa_available() >= 0) {
-        int max_node = numa_max_node();
-        if (max_node > 1) { // Need at least 2 nodes for SNC
-            // Look for non-uniform distance pattern indicating SNC
-            for (int i = 0; i <= max_node; i++) {
-                for (int j = i + 1; j <= max_node; j++) {
-                    int dist_ij = numa_distance(i, j);
-                    // If we find unusual distance patterns, it may indicate SNC
-                    if (dist_ij > 20 && dist_ij < 30) {
-                        NIXL_DEBUG << "Possible SNC detected from NUMA distances: "
-                                   << "Distance between node " << i << " and " << j << " is "
-                                   << dist_ij;
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-
+    /* No evidence of SNC. */
     return false;
 }
 
@@ -841,12 +806,12 @@ nixlCxlExpEngine::estimateXferCost(const nixl_xfer_op_t &op,
         if (cxl_md) break;
     }
 
-    // If no CXL memory is involved, return an error
-    if (!cxl_md) { // nothing on CXL
-        // Use a more conservative estimate for non-CXL memory - 250ms instead of 1s
+    // If no CXL memory is involved, fall back to conservative default but do NOT fail
+    if (!cxl_md) {      /* fall back to conservative default but do NOT fail */
         duration = std::chrono::milliseconds(250);
-        err = std::chrono::milliseconds(100);
-        return NIXL_ERR_NOT_FOUND;
+        err      = std::chrono::milliseconds(100);
+        method   = nixl_cost_t::ANALYTICAL_BACKEND;
+        return NIXL_SUCCESS;
     }
 
     // Pull per-node performance numbers from our database

@@ -14,6 +14,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+/**
+ * Unit tests for the experimental CXL backend.
+ *
+ * These tests exercise three layers of behaviour:
+ *
+ * * *LocalMemoryTransfer* – validates basic DRAM ↔ CXL copy operations,
+ *   including metadata population and data integrity checks.
+ * * *CostEstimation* – ensures the backend returns a finite, reasonable
+ *   duration estimate via `estimateXferCost()`.
+ * * *NumaAwareness* – verifies that memory registered on each NUMA node
+ *   reports the correct node id in its metadata.
+ *
+ * The helper routines below (allocation, descriptor creation, progress
+ * display …) are **test‑only utilities**; they do **not** live in the
+ * production backend.
+ */
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -57,20 +74,38 @@ struct AlignedDeleter {
     }
 };
 
-// Center text in a fixed-width string
+
+/**
+ * Centre‑align a string within a fixed column width.
+ *
+ * @param str Input text.
+ * @return A new string padded with spaces on the left so that the
+ *         original text appears centred in a `line_width`‑column field.
+ */
 std::string
 center_str(const std::string &str) {
     return std::string((line_width - str.length()) / 2, ' ') + str;
 }
 
-// Print a phase title
+
+/**
+ * Generate a numbered phase title like “PHASE 1: Initialisation”.
+ *
+ * @param title Text supplied by the caller.
+ * @return Composite title.
+ */
 std::string
 phase_title(const std::string &title) {
     static int phase_num = 1;
     return "PHASE " + std::to_string(phase_num++) + ": " + title;
 }
 
-// Print a section title
+
+/**
+ * Pretty‑print a section banner framed by `=` characters.
+ *
+ * @param title Text to centre.
+ */
 void
 print_segment_title(const std::string &title) {
     std::cout << std::endl << line_str << std::endl;
@@ -78,7 +113,13 @@ print_segment_title(const std::string &title) {
     std::cout << line_str << std::endl;
 }
 
-// Format duration for display
+
+/**
+ * Convert microseconds to a human‑readable string.
+ *
+ * @param us Duration in microseconds.
+ * @return Formatted value in “xxx ms” or “x.xxx sec”.
+ */
 std::string
 format_duration(nixlTime::us_t us) {
     nixlTime::ms_t ms = us / 1000.0;
@@ -91,7 +132,12 @@ format_duration(nixlTime::us_t us) {
     return ss.str();
 }
 
-// Display a progress bar
+
+/**
+ * Draw an ASCII progress bar that updates in‑place.
+ *
+ * @param progress Fraction complete in the range [0, 1].
+ */
 void
 printProgress(float progress) {
     std::cout << "[";
@@ -115,7 +161,12 @@ printProgress(float progress) {
     }
 }
 
-//  Helper function to return the first NUMA node associated with any CXL.mem device.
+
+/**
+ * Locate the first NUMA node that backs any `CXL.mem` device.
+ *
+ * @return Node id ≥ 0 on success; ‑1 if none found.
+ */
 static int
 find_first_cxl_node() {
     namespace fs = std::filesystem;
@@ -279,7 +330,15 @@ protected:
         delete cxl;
     }
 
-    // Allocate a buffer for testing, placing pages on the node chosen by numactl if available
+
+    /**
+     * Allocate page‑aligned memory on the caller’s preferred NUMA node.
+     *
+     * Falls back to standard `aligned_alloc()` if libnuma is unavailable.
+     *
+     * @param len  Size in bytes.
+     * @param addr Output pointer to the allocated buffer.
+     */
     void
     allocateBuffer(size_t len, void *&addr) {
         addr = nullptr;
@@ -298,7 +357,12 @@ protected:
         memset(addr, 0, len);
     }
 
-    // Release allocated buffer, freeing with numa_free if appropriate
+    /**
+     * Free memory allocated by `allocateBuffer`.
+     *
+     * @param addr Pointer previously returned.
+     * @param len  Length in bytes (required only for `numa_free`).
+     */
     void
     releaseBuffer(void *&addr, size_t len = 0) {
         if (!addr) return;
@@ -310,7 +374,15 @@ protected:
         addr = nullptr;
     }
 
-    // Register memory with the CXL engine
+    /**
+     * Convenience wrapper: allocate DRAM, then register it with the backend.
+     *
+     * @param cxl   Backend instance.
+     * @param addr  Output pointer.
+     * @param len   Allocation length.
+     * @param md    Output backend metadata.
+     * @return NIXL status code.
+     */
     nixl_status_t
     allocateAndRegister(nixlBackendEngine *cxl, void *&addr, size_t len, nixlBackendMD *&md) {
         nixlBlobDesc desc;
@@ -324,7 +396,15 @@ protected:
         return cxl->registerMem(desc, DRAM_SEG, md);
     }
 
-    // Deregister memory with the CXL engine
+    /**
+     * Complement of `allocateAndRegister`.
+     *
+     * @param cxl  Backend instance.
+     * @param addr Pointer to free.
+     * @param md   Metadata handle to deregister.
+     * @param len  Length in bytes (optional for libnuma path).
+     * @return NIXL status code.
+     */
     nixl_status_t
     deallocateAndDeregister(nixlBackendEngine *cxl,
                             void *&addr,
@@ -335,7 +415,21 @@ protected:
         return ret;
     }
 
-    // Perform a memory transfer test with performance measurement
+    /**
+     * Execute a single read or write transfer and verify correctness.
+     *
+     * The function measures elapsed time, prints bandwidth, and asserts
+     * byte‑for‑byte equality between source and destination.
+     *
+     * @param cxl        Backend instance.
+     * @param src_descs  Source descriptor list.
+     * @param dst_descs  Destination descriptor list.
+     * @param src_addr   Raw source pointer.
+     * @param dst_addr   Raw destination pointer.
+     * @param len        Number of bytes to copy.
+     * @param op         Transfer direction.
+     * @param hiter      Handle‑management helper.
+     */
     void
     performTransfer(nixlBackendEngine *cxl,
                     nixl_meta_dlist_t &src_descs,
